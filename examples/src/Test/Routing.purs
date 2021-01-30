@@ -23,7 +23,7 @@ routingWidget :: forall a. Widget HTML a
 routingWidget = do
   routeRef <- liftEffect $ do
     var <- Evar.empty
-    void $ matches myRoutes \_ route -> void $ Evar.tryPut route var
+    void $ matches myRoutes \_ route -> void $ Evar.tryPut route var -- TODO: don't discard finalizer
     pure var
   let awaitRoute = liftAff $ Avar.take routeRef
   -- HACK: This delay is only needed the first time
