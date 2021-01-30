@@ -1,5 +1,7 @@
 module Test.Keyboard where
 
+import Prelude
+
 import Concur.Core.Types (Widget)
 import Concur.React (HTML)
 import Concur.React.DOM as D
@@ -19,7 +21,20 @@ import Effect.Aff (Aff)
 import Effect.Aff.Class (liftAff)
 import Effect.Aff.Compat (EffectFnAff, fromEffectFnAff)
 import Effect.Class (liftEffect)
+import FRP.Event (Event)
+import FRP.Event as FRP.Event
 import React.SyntheticEvent as R
+import Web.Event.Event (EventType(..))
+import Web.Event.Event as Web.Event.Event
+import Web.Event.EventTarget as Web.Event.EventTarget
+import Web.HTML as Web.HTML
+import Web.HTML.Window as Web.HTML.Window
+import Web.UIEvent.KeyboardEvent (KeyboardEvent)
+import Web.UIEvent.KeyboardEvent as Web.UIEvent.KeyboardEvent
+import Web.DOM.Document as Web.DOM.Document
+import Web.HTML.HTMLDocument as Web.HTML.HTMLDocument
+import Effect.AVar as Effect.AVar
+import Effect.Aff.AVar as Effect.Aff.AVar
 
 
 -- A virtual keyboard, that also demonstrates how to handle document level events
@@ -30,34 +45,45 @@ import React.SyntheticEvent as R
 -- A never-ending virtual keypad widget.
 -- Allows the user to navigate and select a key. Displays the selected key.
 keypadWidget :: forall a. Widget HTML a
-keypadWidget = go Enter "" <|> toggleEvents
-  where
-  go focus msg = do
-    keyPressed <- virtualKeyInput focus <|> D.div' [D.text msg]
-    go keyPressed $ "You clicked: " <> show keyPressed
+keypadWidget = do
+  keyboardRef <- liftEffect $ do
+    keyboardRef <- Effect.AVar.empty
 
--- On off button for key events
-toggleEvents :: forall a. Widget HTML a
-toggleEvents = go false
+    -- TODO: don't silently fail to put, use Channel instead of EVar
+    stopListeningKeydownEvent <- FRP.Event.subscribe documentKeydownEvent \keyboardEvent -> void $ Effect.AVar.tryPut keyboardEvent keyboardRef
+
+    pure keyboardRef
+
+  let (awaitKeyboardEvent :: Aff KeyboardEvent) = Effect.Aff.AVar.take keyboardRef
+
+  go awaitKeyboardEvent Enter ""
+
   where
-  go enabled = do
-    _ <- D.button [P.onClick] [D.text $ if enabled then "stop listening" else "start listening"]
-    liftEffect (if enabled then stopListening else startListening)
-    go (not enabled)
+  go awaitKeyboardEvent focus msg = do
+    keyPressed <- virtualKeyInput awaitKeyboardEvent focus <|> D.div' [D.text msg]
+    go awaitKeyboardEvent keyPressed ("You clicked: " <> show keyPressed)
+
+-- | -- On off button for key events
+-- | toggleEvents :: forall a. Widget HTML a
+-- | toggleEvents = go false
+-- |   where
+-- |   go enabled = do
+-- |     _ <- D.button [P.onClick] [D.text $ if enabled then "stop listening" else "start listening"]
+-- |     liftEffect (if enabled then stopListening else startListening)
+-- |     go (not enabled)
 
 -- Displays a keypad with the supplied initial focus.
 -- Allows the user to navigate and select a key. Returns the selected key.
-virtualKeyInput :: Focus -> Widget HTML Key
-virtualKeyInput focus = do
-  evt <- liftAff awaitKey <|> keypadButtons focus
-  key <- liftEffect $ toKey evt
+virtualKeyInput :: Aff KeyboardEvent -> Focus -> Widget HTML Key
+virtualKeyInput awaitKeyboardEvent focus = do
+  (key :: Maybe Key) <- liftAff (map toKey awaitKeyboardEvent) <|> keypadButtons focus
   case key of
     Just Enter -> pure focus
-    Nothing -> virtualKeyInput focus
-    Just ArrowUp -> virtualKeyInput (transition focus U)
-    Just ArrowDown -> virtualKeyInput (transition focus D)
-    Just ArrowLeft -> virtualKeyInput (transition focus L)
-    Just ArrowRight -> virtualKeyInput (transition focus R)
+    Nothing -> virtualKeyInput awaitKeyboardEvent focus
+    Just ArrowUp -> virtualKeyInput awaitKeyboardEvent (transition focus U)
+    Just ArrowDown -> virtualKeyInput awaitKeyboardEvent (transition focus D)
+    Just ArrowLeft -> virtualKeyInput awaitKeyboardEvent (transition focus L)
+    Just ArrowRight -> virtualKeyInput awaitKeyboardEvent (transition focus R)
 
 -- Dispay only. Renders the keypad buttons with the supplied focus
 keypadButtons :: forall a. Focus -> Widget HTML a
@@ -82,15 +108,24 @@ keypadButtons focus = D.table' $ pure $ D.tbody'
 
 -- FFI ------------------------------------------------------------
 
--- Start and stop listening for keyboard events
-foreign import startListening :: Effect Unit
-foreign import stopListening :: Effect Unit
+documentKeydownEvent :: Event KeyboardEvent
+documentKeydownEvent = FRP.Event.makeEvent \push -> do
+  window <- Web.HTML.window
 
--- Await a key input. Requires that we are listening for events.
-foreign import _awaitKey :: EffectFnAff R.SyntheticKeyboardEvent
-awaitKey :: Aff R.SyntheticKeyboardEvent
-awaitKey = fromEffectFnAff _awaitKey
+  document <- Web.HTML.Window.document window
 
+  eventListener <- Web.Event.EventTarget.eventListener
+    (\event ->
+      case Web.UIEvent.KeyboardEvent.fromEvent event of
+          Nothing -> pure unit
+          Just event' -> push event'
+    )
+
+  let eventType = EventType "keydown"
+
+  Web.Event.EventTarget.addEventListener eventType eventListener false (Web.HTML.HTMLDocument.toEventTarget document)
+
+  pure $ Web.Event.EventTarget.removeEventListener eventType eventListener false (Web.HTML.HTMLDocument.toEventTarget document)
 
 -- Data structures ------------------------------------------------
 
@@ -120,10 +155,9 @@ type Focus = Key
 
 data Dir = U | D | L | R
 
-toKey :: R.SyntheticKeyboardEvent -> Effect (Maybe Key)
-toKey event = do
-  k <- R.key event
-  pure $ case k of
+toKey :: KeyboardEvent -> Maybe Key
+toKey event =
+  case Web.UIEvent.KeyboardEvent.key event of
     "ArrowUp" -> Just ArrowUp
     "ArrowDown" -> Just ArrowDown
     "ArrowLeft" -> Just ArrowLeft
